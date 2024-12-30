@@ -1,0 +1,239 @@
+classdef SignalVisualizerApp < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure                   matlab.ui.Figure
+        StartButton                matlab.ui.control.Button
+        StopButton                 matlab.ui.control.Button
+        FilterDropDownLabel        matlab.ui.control.Label
+        FilterDropDown             matlab.ui.control.DropDown
+        PortDropDownLabel          matlab.ui.control.Label
+        PortDropDown               matlab.ui.control.DropDown
+        SignalAxes                 matlab.ui.control.UIAxes
+        FilteredSignalAxes         matlab.ui.control.UIAxes
+        FFTAxes                    matlab.ui.control.UIAxes
+    end
+
+    properties (Access = private)
+        Arduino                    % Arduino Object
+        Timer                      % Timer for real-time data acquisition
+        DataBuffer                 % Data buffer for real-time plotting
+        Fs = 500;                  % Sampling frequency (Hz) (Updated to 500 Hz)
+    end
+
+    methods (Access = private)
+
+        % Function to initialize Arduino
+        function initializeArduino(app)
+            try
+                selectedPort = app.PortDropDown.Value;
+                app.Arduino = arduino(selectedPort, 'Uno');
+                disp('Arduino connected.');
+            catch ME
+                uialert(app.UIFigure, ['Arduino connection failed: ', ME.message], 'Error');
+            end
+        end
+        
+        % Function to start real-time data acquisition
+        function startDataAcquisition(app)
+            app.Timer = timer('ExecutionMode', 'fixedRate', ...
+                             'Period', 1/app.Fs, ...
+                             'TimerFcn', @(,) app.updatePlots());
+            start(app.Timer);
+        end
+        
+        % Function to stop real-time data acquisition
+        function stopDataAcquisition(app)
+            if ~isempty(app.Timer)
+                stop(app.Timer);
+                delete(app.Timer);
+                app.Timer = [];
+            end
+        end
+        
+        % Function to update plots
+        function updatePlots(app)
+    try
+        if isempty(app.Arduino)
+            error('Arduino bağlantısı bulunamadı.');
+        end
+        
+        % Analog pin değerini oku
+        rawData = readVoltage(app.Arduino, 'A0');
+        
+        % Verileri tampon içine ekle
+        app.DataBuffer = [app.DataBuffer, rawData];
+        if length(app.DataBuffer) > app.Fs * 5
+            app.DataBuffer = app.DataBuffer(end - app.Fs * 5 + 1:end);
+        end
+        
+        % Veriyi filtrele ve işle
+        filteredData = app.applyFilter(app.DataBuffer);
+        L = length(filteredData);
+        f = app.Fs * (0:(L / 2)) / L;
+        Y = fft(filteredData);
+        P2 = abs(Y / L);
+        P1 = P2(1:L/2+1);
+        P1(2:end-1) = 2 * P1(2:end-1);
+
+        % Grafik güncelle
+        plot(app.SignalAxes, app.DataBuffer);
+        title(app.SignalAxes, 'Raw Signal');
+        plot(app.FilteredSignalAxes, filteredData);
+        title(app.FilteredSignalAxes, 'Filtered Signal');
+        plot(app.FFTAxes, f, P1);
+        title(app.FFTAxes, 'FFT of Signal');
+    catch ME
+        disp(['Hata: ', ME.message]);
+    end
+end
+
+        
+        % Function to apply filter based on user selection
+        function filteredData = applyFilter(app, data)
+            filterType = app.FilterDropDown.Value;
+            switch filterType
+                case 'Low Pass'
+                    filteredData = lowpass(data, 50, app.Fs); % Adjusted cutoff frequency
+                case 'High Pass'
+                    filteredData = highpass(data, 20, app.Fs); % Adjusted cutoff frequency
+                case 'Band Pass'
+                    filteredData = bandpass(data, [20 200], app.Fs); % 20-200 Hz for heart sounds
+                otherwise
+                    filteredData = data; % No filtering
+            end
+        end
+        
+        % Function to populate available serial ports
+        function populateSerialPorts(app)
+            ports = serialportlist("available");
+            if isempty(ports)
+                ports = {'No ports available'};
+            end
+            app.PortDropDown.Items = ports;
+            if ~isempty(ports)
+                app.PortDropDown.Value = ports{1};
+            end
+        end
+        
+    end
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Code to execute after component creation
+        function startupFcn(app)
+            app.DataBuffer = zeros(1, 5 * app.Fs); % Initialize buffer for 5 seconds
+            populateSerialPorts(app);
+        end
+
+        % Button pushed function: StartButton
+        function StartButtonPushed(app, ~)
+            initializeArduino(app);
+            startDataAcquisition(app);
+        end
+
+        % Button pushed function: StopButton
+        function StopButtonPushed(app, ~)
+            stopDataAcquisition(app);
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.Position = [100 100 800 600];
+            app.UIFigure.Name = 'MATLAB App';
+
+            % Create StartButton
+            app.StartButton = uibutton(app.UIFigure, 'push');
+            app.StartButton.ButtonPushedFcn = createCallbackFcn(app, @StartButtonPushed, true);
+            app.StartButton.Position = [50 550 100 22];
+            app.StartButton.Text = 'Start';
+
+            % Create StopButton
+            app.StopButton = uibutton(app.UIFigure, 'push');
+            app.StopButton.ButtonPushedFcn = createCallbackFcn(app, @StopButtonPushed, true);
+            app.StopButton.Position = [200 550 100 22];
+            app.StopButton.Text = 'Stop';
+
+            % Create FilterDropDownLabel
+            app.FilterDropDownLabel = uilabel(app.UIFigure);
+            app.FilterDropDownLabel.HorizontalAlignment = 'right';
+            app.FilterDropDownLabel.Position = [350 550 50 22];
+            app.FilterDropDownLabel.Text = 'Filter';
+
+            % Create FilterDropDown
+            app.FilterDropDown = uidropdown(app.UIFigure);
+            app.FilterDropDown.Items = {'None', 'Low Pass', 'High Pass', 'Band Pass'};
+            app.FilterDropDown.Position = [410 550 100 22];
+            app.FilterDropDown.Value = 'None';
+
+            % Create PortDropDownLabel
+            app.PortDropDownLabel = uilabel(app.UIFigure);
+            app.PortDropDownLabel.HorizontalAlignment = 'right';
+            app.PortDropDownLabel.Position = [550 550 50 22];
+            app.PortDropDownLabel.Text = 'Port';
+
+            % Create PortDropDown
+            app.PortDropDown = uidropdown(app.UIFigure);
+            app.PortDropDown.Position = [610 550 150 22];
+            app.PortDropDown.Items = {'No ports available'};
+            if ~isempty(app.PortDropDown.Items)
+                app.PortDropDown.Value = app.PortDropDown.Items{1};
+            else
+                app.PortDropDown.Value = 'No ports available';
+            end
+
+            % Create SignalAxes
+            app.SignalAxes = uiaxes(app.UIFigure);
+            app.SignalAxes.Position = [50 300 300 200];
+            title(app.SignalAxes, 'Raw Signal');
+
+            % Create FilteredSignalAxes
+            app.FilteredSignalAxes = uiaxes(app.UIFigure);
+            app.FilteredSignalAxes.Position = [400 300 300 200];
+            title(app.FilteredSignalAxes, 'Filtered Signal');
+
+            % Create FFTAxes
+            app.FFTAxes = uiaxes(app.UIFigure);
+            app.FFTAxes.Position = [225 50 350 200];
+            title(app.FFTAxes, 'FFT of Signal');
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = SignalVisualizerApp
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Execute the startup function
+            startupFcn(app)
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete timer
+            if ~isempty(app.Timer)
+                stop(app.Timer);
+                delete(app.Timer);
+            end
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
